@@ -20,6 +20,11 @@ if not API_KEY:
     st.error("⚠️ 系統偵測不到 API 金鑰！請確保已在 Streamlit 後台的 Secrets 中設定 `GEMINI_API_KEY`。")
     st.stop()
 
+# 抓漏專用：顯示金鑰前 4 碼與總長度，確認雲端到底讀到什麼
+st.info(f"🕵️ 抓漏雷達：目前系統讀取到的金鑰開頭為 【 {API_KEY[:4]} 】")
+st.info(f"📏 金鑰總長度為：{len(API_KEY)} 個字元")
+
+
 # 自動鎖定 app.py 當前所在的資料夾絕對路徑
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 定義存放官方手冊、歷史報告與資料庫的路徑
