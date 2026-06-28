@@ -3,6 +3,8 @@ import os
 import time
 import random
 from google import genai
+# 強制將保險箱抓到的金鑰傳入 api_key 參數中
+client = genai.Client(api_key=API_KEY)
 from PIL import Image
 
 # 載入 PDF 處理與本機資料庫的基礎工具
