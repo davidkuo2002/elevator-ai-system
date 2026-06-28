@@ -3,8 +3,6 @@ import os
 import time
 import random
 from google import genai
-# 強制將保險箱抓到的金鑰傳入 api_key 參數中
-client = genai.Client(api_key=API_KEY)
 from PIL import Image
 
 # 載入 PDF 處理與本機資料庫的基礎工具
@@ -13,8 +11,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 
 # ==========================================
-# 🔐 安全設定區 (使用官方標準讀取機制)
+# 🔐 安全設定區 (讀取雲端 Secrets 保險箱)
 # ==========================================
+# 系統會自動去 Streamlit 後台的 Settings -> Secrets 尋找 GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not API_KEY:
@@ -30,12 +29,15 @@ os.makedirs(MANUALS_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 # ==========================================
 
-# 初始化官方標準 Google GenAI 客戶端
-client = genai.Client(api_key=API_KEY)
+# 初始化官方標準 Google GenAI 客戶端 (強制附加標頭，完美對應新版 AQ 金鑰驗證機制)
+client = genai.Client(
+    api_key=API_KEY,
+    http_options={'headers': {'x-goog-api-key': API_KEY}}
+)
 os.environ["GEMINI_API_KEY"] = API_KEY
 
 # ------------------------------------------
-# 特徵轉換包裝類別
+# 特徵轉換包裝類別 (具備自動重試機制)
 # ------------------------------------------
 class GenAIEmbeddingsWrapper:
     def _embed_with_retry(self, model: str, contents: list[str]) -> any:
@@ -45,7 +47,8 @@ class GenAIEmbeddingsWrapper:
             try:
                 response = client.models.embed_content(
                     model=model,
-                    contents=contents
+                    contents=contents,
+                    config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
                 )
                 return response
             except Exception as e:
@@ -158,9 +161,11 @@ with col2:
                         audio_bytes = audio_file.read()
                         from google.genai import types
                         audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
+                        
                         transcript_response = client.models.generate_content(
                             model='gemini-2.5-flash',
-                            contents=[audio_part, "請精準辨識這段語音，直接輸出繁體中文逐字稿，不需任何額外說明。"]
+                            contents=[audio_part, "請精準辨識這段語音，直接輸出繁體中文逐字稿，不需任何額外說明。"],
+                            config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
                         )
                         spoken_text = transcript_response.text
                         st.info(f"🗣️ 語音辨識結果：{spoken_text}")
@@ -186,7 +191,8 @@ with col2:
                     
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
-                        contents=full_content
+                        contents=full_content,
+                        config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
                     )
                     
                     st.success("分析完成！")
