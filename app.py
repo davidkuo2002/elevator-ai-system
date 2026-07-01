@@ -25,7 +25,7 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 (修復版：保護中文編碼，精準切片) ---
+# --- 知識庫核心 (保護中文編碼，精準切片) ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
@@ -34,7 +34,6 @@ def load_expert_knowledge_base(system_name):
             for file in os.listdir(directory):
                 if file.endswith('.pdf'):
                     loader = PyPDFLoader(os.path.join(directory, file))
-                    # 拔除 encode('utf-8', 'ignore')，保留原始 PDF 文字，防止關鍵字被吃掉
                     all_docs.extend(loader.load())
     
     add_docs(os.path.join("./manuals", system_name))
@@ -42,7 +41,7 @@ def load_expert_knowledge_base(system_name):
     
     if not all_docs: return None
     
-    # ⚡ 核心修正：指定中文字元分隔符，絕對不切斷單一中文字的編碼
+    # 嚴格保護中文字元不被切斷
     splitter = RecursiveCharacterTextSplitter(
         separators=["\n\n", "\n", "。", "！", "？", "，", "、", ""],
         chunk_size=800,
@@ -88,14 +87,10 @@ elif st.session_state.page == 3:
         try:
             db = load_expert_knowledge_base(st.session_state.control_system)
             
-            # 優化搜尋語句，讓 Chroma 更好抓取關鍵字
             query = f"主機板故障碼:{st.session_state.board_code} 變頻器故障碼:{st.session_state.inverter_code} 狀況:{st.session_state.fault_desc}"
-            
-            # ⚡ 核心修正：退回最安全的 k=4，避免雜訊污染 AI 判斷
             docs = db.similarity_search(query, k=4) if db else []
             context = "\n".join([d.page_content for d in docs])
             
-            # 簡化且明確的 Prompt，防止 AI 邏輯崩潰
             prompt = f"""你是一位資深電梯維修專家。請根據下方知識庫內容，提供精簡、準確的繁體中文維修建議。
             
             【任務規則】
@@ -128,7 +123,12 @@ elif st.session_state.page == 3:
             st.markdown(response.content)
             
         except Exception as e:
-            st.error(f"分析發生錯誤: {e}")
+            error_msg = str(e)
+            # ⚡ 攔截 API 流量限制的錯誤
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                st.warning("⏳ 系統目前分析請求較多（已達免費 API 流量上限）。請您稍等 1 分鐘後，再次點擊分析！")
+            else:
+                st.error(f"分析發生錯誤: {e}")
             
     if st.button("結束並重置"):
         st.session_state.page = 1
