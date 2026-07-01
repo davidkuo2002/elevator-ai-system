@@ -13,24 +13,37 @@ from langchain_core.messages import HumanMessage
 st.set_page_config(page_title="電梯 AI 診斷系統", layout="centered")
 
 # ==========================================
-# 🎨 系統背景設定 (自動讀取 assets 資料夾圖片)
+# 🎨 系統背景設定 (加入快取機制，防止重複讀取)
 # ==========================================
-def set_local_background():
-    assets_dir = "./assets"
-    # 確保資料夾存在
+@st.cache_data(show_spinner=False)
+def get_cached_background_base64(assets_dir):
+    """
+    此函式加入了快取機制。
+    只有在系統初次啟動、或是 assets 資料夾內容有變更時，才會真正執行裡面的程式碼。
+    平常切換網頁或重整時，Streamlit 會直接從記憶體回傳結果，效率極高。
+    """
     if not os.path.exists(assets_dir):
         os.makedirs(assets_dir)
-        return
+        return None
     
-    # 抓取資料夾內的圖片檔 (支援 png, jpg, jpeg)
+    # 抓取資料夾內的圖片檔
     bg_files = [f for f in os.listdir(assets_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
     
-    # 如果有找到圖片，就拿第一張來當背景
     if bg_files:
         bg_path = os.path.join(assets_dir, bg_files[0])
-        with open(bg_path, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode()
-            
+        try:
+            with open(bg_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode()
+        except Exception:
+            return None
+    return None
+
+def set_local_background():
+    assets_folder = "./assets"
+    # 呼叫帶有快取的函式
+    encoded_string = get_cached_background_base64(assets_folder)
+    
+    if encoded_string:
         st.markdown(
             f"""
             <style>
@@ -45,7 +58,7 @@ def set_local_background():
             unsafe_allow_html=True
         )
 
-# 執行設定背景的函式
+# 執行背景設定
 set_local_background()
 
 # --- 初始化「頁面狀態」與「暫存變數」 ---
