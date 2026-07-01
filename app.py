@@ -6,6 +6,7 @@ import base64
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter  # 👈 新增：節流核心套件
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
@@ -13,22 +14,14 @@ from langchain_core.messages import HumanMessage
 st.set_page_config(page_title="電梯 AI 診斷系統", layout="centered")
 
 # ==========================================
-# 🎨 系統背景設定 (加入快取機制，防止重複讀取)
+# 🎨 系統背景設定 (快取記憶體機制)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def get_cached_background_base64(assets_dir):
-    """
-    此函式加入了快取機制。
-    只有在系統初次啟動、或是 assets 資料夾內容有變更時，才會真正執行裡面的程式碼。
-    平常切換網頁或重整時，Streamlit 會直接從記憶體回傳結果，效率極高。
-    """
     if not os.path.exists(assets_dir):
         os.makedirs(assets_dir)
         return None
-    
-    # 抓取資料夾內的圖片檔
     bg_files = [f for f in os.listdir(assets_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    
     if bg_files:
         bg_path = os.path.join(assets_dir, bg_files[0])
         try:
@@ -40,9 +33,7 @@ def get_cached_background_base64(assets_dir):
 
 def set_local_background():
     assets_folder = "./assets"
-    # 呼叫帶有快取的函式
     encoded_string = get_cached_background_base64(assets_folder)
-    
     if encoded_string:
         st.markdown(
             f"""
@@ -58,7 +49,6 @@ def set_local_background():
             unsafe_allow_html=True
         )
 
-# 執行背景設定
 set_local_background()
 
 # --- 初始化「頁面狀態」與「暫存變數」 ---
@@ -79,7 +69,6 @@ st.sidebar.subheader("📄 歷史維修報告擴充")
 st.sidebar.write("上傳過去的維修報告單，AI 會將其作為額外參考。")
 uploaded_report = st.sidebar.file_uploader("上傳維修報告 (PDF)", type="pdf")
 
-# 解析上傳的維修報告單內容
 report_text = ""
 if uploaded_report:
     try:
@@ -90,7 +79,7 @@ if uploaded_report:
     except Exception as e:
         st.sidebar.error("讀取報告失敗。")
 
-# --- 知識庫載入功能 (本地開源模型) ---
+# --- 知識庫載入功能 (引進節流切片技術) ---
 @st.cache_resource(show_spinner=False)
 def load_knowledge_base():
     manuals_dir = "./manuals"
@@ -108,8 +97,12 @@ def load_knowledge_base():
         loader = PyPDFLoader(os.path.join(manuals_dir, file))
         documents.extend(loader.load())
         
+    # ⚡ 節流關鍵設定：將整頁 PDF 切割成 600 字的小片段，彼此重疊 60 字確保語意不中斷
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=60)
+    split_docs = text_splitter.split_documents(documents)
+    
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    return Chroma.from_documents(documents, embeddings)
+    return Chroma.from_documents(split_docs, embeddings)
 
 st.session_state.db = load_knowledge_base()
 
@@ -126,7 +119,7 @@ if st.session_state.page == 1:
     control_system = st.selectbox(
         "請確認目前維修的電梯廠牌與控制系統：",
         ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"],
-        index=0 if not st.session_state.control_system else ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"].index(st.session_state.control_system)
+        index=0 if not st.session_state.control_system else ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微电脑變頻型)", "系統 C (最新無機房型)"].index(st.session_state.control_system)
     )
     
     if st.button("確認，進入下一步 ➡️", type="primary"):
@@ -181,12 +174,15 @@ elif st.session_state.page == 3:
     
     with st.spinner("AI 正在比對手冊、歷史報告與現場照片..."):
         try:
+            # 1. 檢索出最相關的 3 個小片段（由於前面切碎了，此處傳遞給 AI 的字數極少、極精準）
             search_query = f"系統:{st.session_state.control_system} 故障碼:{st.session_state.fault_code} 狀況:{st.session_state.fault_desc}"
             docs = st.session_state.db.similarity_search(search_query, k=3) if st.session_state.db else []
             manual_context = "\n".join([doc.page_content for doc in docs])
             
+            # 2. 組合優化後的提示詞（加入嚴格的 Output 流量約束）
             prompt = f"""
             你是一位資深的電梯維修工程師。請綜合以下資訊，給予現場維修人員最專業、安全的處置建議。
+            注意：請用最精煉、扼要的繁體中文回答，直擊核心，避免冗長贅字與客套話，以幫我節省 Token 流量。
             
             【現場輸入資訊】
             - 控制系統：{st.session_state.control_system}
@@ -199,12 +195,13 @@ elif st.session_state.page == 3:
             【歷史故障維修報告單參考】
             {report_text if report_text else "本次未提供歷史報告。"}
             
-            請根據上述資料（若有提供現場照片，請一併分析），給出：
-            1. 可能的故障原因。
-            2. 建議的維修步驟與檢查點。
-            3. 現場安全注意事項。
+            請嚴格以下列結構精簡回覆：
+            1. 可能的故障原因（條列）。
+            2. 建議的維修步驟與檢查點（步驟化）。
+            3. 現場安全注意事項（一秒看懂）。
             """
 
+            # 3. 呼叫最新世代 gemini-3.5-flash
             llm = ChatGoogleGenerativeAI(
                 model="gemini-3.5-flash", 
                 google_api_key=st.secrets["GEMINI_API_KEY"]
