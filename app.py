@@ -26,7 +26,7 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 (合併載入 + 亂碼清理) ---
+# --- 知識庫核心 ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
@@ -49,8 +49,11 @@ def load_expert_knowledge_base(system_name):
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return Chroma.from_documents(split_docs, embeddings)
 
-# --- 初始化狀態 ---
+# --- 初始化 ---
 if 'page' not in st.session_state: st.session_state.page = 1
+if 'board_code' not in st.session_state: st.session_state.board_code = ""
+if 'inverter_code' not in st.session_state: st.session_state.inverter_code = ""
+if 'fault_desc' not in st.session_state: st.session_state.fault_desc = ""
 
 # --- 頁面邏輯 ---
 if st.session_state.page == 1:
@@ -64,15 +67,11 @@ if st.session_state.page == 1:
 
 elif st.session_state.page == 2:
     st.title("📋 現場狀況回報")
-    
     st.session_state.board_code = st.text_input("主機板故障碼:", value=st.session_state.board_code)
     st.session_state.inverter_code = st.text_input("變頻器故障碼:", value=st.session_state.inverter_code)
-    
-    # 💡 提示使用者使用輸入法內建的麥克風圖示
-    st.info("💡 提示：點擊下方文字框後，請使用手機鍵盤上的「麥克風」圖示進行語音轉文字。")
-    st.session_state.fault_desc = st.text_area("現場狀況描述 (請用語音輸入法):", value=st.session_state.fault_desc, height=150)
-    
-    st.session_state.uploaded_file = st.file_uploader("上傳現場照片 (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
+    st.info("💡 提示：請使用手機輸入法的「麥克風」功能進行語音轉文字輸入。")
+    st.session_state.fault_desc = st.text_area("現場狀況描述:", value=st.session_state.fault_desc, height=150)
+    st.session_state.uploaded_file = st.file_uploader("上傳現場照片", type=['jpg', 'jpeg', 'png'])
     
     col1, col2 = st.columns(2)
     with col1:
@@ -89,7 +88,7 @@ elif st.session_state.page == 3:
             docs = db.similarity_search(query, k=3) if db else []
             context = "\n".join([d.page_content for d in docs])
             
-            prompt = f"你是一位資深電梯維修專家。請整合知識庫資訊，針對以下狀況提供精簡建議：\n知識庫資訊：{context}\n現場狀況：控制系統{st.session_state.control_system}, 主機板碼:{st.session_state.board_code}, 變頻器碼:{st.session_state.inverter_code}, 描述:{st.session_state.fault_desc}"
+            prompt = f"你是一位資深電梯維修專家。請整合知識庫資訊，針對以下狀況提供精簡建議：\n知識庫資訊：{context}\n現場狀況：系統{st.session_state.control_system}, 主機板碼:{st.session_state.board_code}, 變頻器碼:{st.session_state.inverter_code}, 描述:{st.session_state.fault_desc}"
 
             llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", google_api_key=st.secrets["GEMINI_API_KEY"])
             
@@ -111,4 +110,7 @@ elif st.session_state.page == 3:
     if st.button("結束並重置"):
         st.session_state.page = 1
         st.session_state.uploaded_file = None
+        st.session_state.board_code = ""
+        st.session_state.inverter_code = ""
+        st.session_state.fault_desc = ""
         st.rerun()
