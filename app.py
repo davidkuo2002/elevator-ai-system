@@ -26,7 +26,7 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 ---
+# --- 知識庫核心 (合併載入 + 亂碼清理) ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
@@ -65,17 +65,14 @@ if st.session_state.page == 1:
 elif st.session_state.page == 2:
     st.title("📋 現場狀況回報")
     
-    # 💡 故障碼區分：主機板 vs 變頻器
-    st.session_state.board_code = st.text_input("主機板故障碼 (選填):")
-    st.session_state.inverter_code = st.text_input("變頻器故障碼 (選填):")
+    st.session_state.board_code = st.text_input("主機板故障碼:", value=st.session_state.board_code)
+    st.session_state.inverter_code = st.text_input("變頻器故障碼:", value=st.session_state.inverter_code)
     
-    st.session_state.fault_desc = st.text_area("現場狀況描述:")
+    # 💡 提示使用者使用輸入法內建的麥克風圖示
+    st.info("💡 提示：點擊下方文字框後，請使用手機鍵盤上的「麥克風」圖示進行語音轉文字。")
+    st.session_state.fault_desc = st.text_area("現場狀況描述 (請用語音輸入法):", value=st.session_state.fault_desc, height=150)
     
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.session_state.audio_value = st.audio_input("錄製現場聲音")
-    with col_b:
-        st.session_state.uploaded_file = st.file_uploader("上傳現場照片", type=['jpg', 'jpeg', 'png'])
+    st.session_state.uploaded_file = st.file_uploader("上傳現場照片 (JPG/PNG)", type=['jpg', 'jpeg', 'png'])
     
     col1, col2 = st.columns(2)
     with col1:
@@ -88,22 +85,11 @@ elif st.session_state.page == 3:
     with st.spinner("AI 正在整合規範與經驗..."):
         try:
             db = load_expert_knowledge_base(st.session_state.control_system)
-            # 檢索內容包含區分後的故障碼
             query = f"{st.session_state.board_code} {st.session_state.inverter_code} {st.session_state.fault_desc}"
             docs = db.similarity_search(query, k=3) if db else []
             context = "\n".join([d.page_content for d in docs])
             
-            prompt = f"""你是一位資深電梯維修專家。
-            請根據檢索到的技術資訊進行分析，特別注意區分故障來源。
-            
-            知識庫檢索內容：{context}
-            現場狀況：
-            - 控制系統：{st.session_state.control_system}
-            - 主機板故障碼：{st.session_state.board_code}
-            - 變頻器故障碼：{st.session_state.inverter_code}
-            - 狀況描述：{st.session_state.fault_desc}
-            
-            請列出：1. 故障原因分析 2. 維修處置建議 3. 安全警示。保持精簡且明確區分故障來源。"""
+            prompt = f"你是一位資深電梯維修專家。請整合知識庫資訊，針對以下狀況提供精簡建議：\n知識庫資訊：{context}\n現場狀況：控制系統{st.session_state.control_system}, 主機板碼:{st.session_state.board_code}, 變頻器碼:{st.session_state.inverter_code}, 描述:{st.session_state.fault_desc}"
 
             llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", google_api_key=st.secrets["GEMINI_API_KEY"])
             
@@ -125,5 +111,4 @@ elif st.session_state.page == 3:
     if st.button("結束並重置"):
         st.session_state.page = 1
         st.session_state.uploaded_file = None
-        st.session_state.audio_value = None
         st.rerun()
