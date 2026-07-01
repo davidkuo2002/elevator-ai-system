@@ -1,11 +1,11 @@
 import streamlit as st
 import os
 import base64
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings  # 👈 核心加速套件
 from langchain_core.messages import HumanMessage
 
 st.set_page_config(page_title="電梯 AI 專家診斷系統", layout="centered")
@@ -25,7 +25,7 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 (保護中文編碼，精準切片) ---
+# --- 知識庫核心 (保護中文編碼 + Google 雲端加速) ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
@@ -48,7 +48,12 @@ def load_expert_knowledge_base(system_name):
         chunk_overlap=100
     )
     split_docs = splitter.split_documents(all_docs)
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    
+    # ⚡ 核心加速：將 55 頁的運算負擔轉移給 Google 伺服器
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/embedding-001", 
+        google_api_key=st.secrets["GEMINI_API_KEY"]
+    )
     return Chroma.from_documents(split_docs, embeddings)
 
 # --- 初始化 ---
@@ -124,7 +129,6 @@ elif st.session_state.page == 3:
             
         except Exception as e:
             error_msg = str(e)
-            # ⚡ 攔截 API 流量限制的錯誤
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                 st.warning("⏳ 系統目前分析請求較多（已達免費 API 流量上限）。請您稍等 1 分鐘後，再次點擊分析！")
             else:
