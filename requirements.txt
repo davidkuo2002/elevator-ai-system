@@ -8,3 +8,5 @@ sentence-transformers
 chromadb
 pypdf
 PyPDF2
+SpeechRecognition
+pyaudio
