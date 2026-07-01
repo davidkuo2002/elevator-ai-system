@@ -120,7 +120,7 @@ if st.session_state.page == 1:
     st.title("🛠️ 第一步：選擇控制系統")
     
     # 選單名稱必須與 manuals 底下的子資料夾名稱完全一致
-    system_options = ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"]
+    system_options = ["請選擇...", "系統 A (CHIMAX)", "系統 B (HPM)", "系統 C (IDE)"]
     
     control_system = st.selectbox(
         "請確認目前維修的電梯廠牌與控制系統：",
