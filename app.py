@@ -44,13 +44,11 @@ def load_knowledge_base():
     progress_text.text("正在建立向量特徵庫，請稍候...")
     
     try:
-        # 使用金鑰進行向量化
-            # 修改後 (請直接複製這一小段去替換)：
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004", 
-        google_api_key=st.secrets["GEMINI_API_KEY"]
-    )
-
+        # 使用最新支援的 text-embedding-004 模型進行向量化
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004", 
+            google_api_key=st.secrets["GEMINI_API_KEY"]
+        )
         return Chroma.from_documents(documents, embeddings)
     except Exception as e:
         st.error(f"建立知識庫時發生錯誤 (可能金鑰無效或額度超限): {e}")
