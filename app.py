@@ -1,205 +1,90 @@
 import streamlit as st
-import os
 import time
-import random
-from google import genai
-from PIL import Image
-
-# 載入 PDF 處理與本機資料庫的基礎工具
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+import os
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import PyPDFLoader
 
-# ==========================================
-# 🔐 安全設定區 (讀取雲端 Secrets 保險箱)
-# ==========================================
-# 系統會自動去 Streamlit 後台的 Settings -> Secrets 尋找 GEMINI_API_KEY
-API_KEY = os.environ.get("GEMINI_API_KEY")
+# --- 頁面配置 ---
+st.set_page_config(page_title="電梯 AI 診斷系統", layout="wide")
+st.title("Elevator AI 診斷系統")
 
-if not API_KEY:
-    st.error("⚠️ 系統偵測不到 API 金鑰！請確保已在 Streamlit 後台的 Secrets 中設定 `GEMINI_API_KEY`。")
-    st.stop()
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MANUALS_DIR = os.path.join(BASE_DIR, "manuals")
-REPORTS_DIR = os.path.join(BASE_DIR, "reports")  
-DB_DIR = os.path.join(BASE_DIR, "chroma_db")
-
-os.makedirs(MANUALS_DIR, exist_ok=True)
-os.makedirs(REPORTS_DIR, exist_ok=True)
-# ==========================================
-
-# 初始化官方標準 Google GenAI 客戶端 (強制附加標頭，完美對應新版 AQ 金鑰驗證機制)
-client = genai.Client(
-    api_key=API_KEY,
-    http_options={'headers': {'x-goog-api-key': API_KEY}}
-)
-os.environ["GEMINI_API_KEY"] = API_KEY
-
-# ------------------------------------------
-# 特徵轉換包裝類別 (具備自動重試機制)
-# ------------------------------------------
-class GenAIEmbeddingsWrapper:
-    def _embed_with_retry(self, model: str, contents: list[str]) -> any:
-        max_retries = 6      
-        base_delay = 2       
-        for attempt in range(max_retries):
-            try:
-                response = client.models.embed_content(
-                    model=model,
-                    contents=contents,
-                    config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
-                )
-                return response
-            except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg and attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(delay)
-                else:
-                    raise e
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        all_embeddings = []
-        batch_size = 20  
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i + batch_size]
-            response = self._embed_with_retry(model="gemini-embedding-001", contents=batch_texts)
-            all_embeddings.extend([embedding.values for embedding in response.embeddings])
-            time.sleep(0.5)
-        return all_embeddings
-
-    def embed_query(self, text: str) -> list[float]:
-        response = self._embed_with_retry(model="gemini-embedding-001", contents=[text])
-        return response.embeddings[0].values
-
-@st.cache_resource
-def setup_rag_database_multi_file():
-    if os.path.exists(DB_DIR) and len(os.listdir(DB_DIR)) > 0:
-        try:
-            embeddings = GenAIEmbeddingsWrapper()
-            vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-            return vectorstore, None
-        except Exception as e:
-            return None, f"讀取本機已快取知識庫時發生錯誤：{e}"
-
-    manual_files = [f for f in os.listdir(MANUALS_DIR) if f.lower().endswith(".pdf")]
-    report_files = [f for f in os.listdir(REPORTS_DIR) if f.lower().endswith(".pdf")]
+# --- 知識庫載入功能 (專為免費金鑰設計) ---
+def load_knowledge_base():
+    manuals_dir = "./manuals"
+    documents = []
     
-    if not manual_files and not report_files:
-        return None, "知識庫資料夾內空空如也！請至少在 `manuals` 放入一份官方手冊 PDF。"
+    # 確保資料夾存在，若無則自動建立防呆
+    if not os.path.exists(manuals_dir):
+        os.makedirs(manuals_dir)
+        st.error("已自動建立 manuals 資料夾，但裡面沒有手冊。請至 GitHub 放入 PDF 後再試。")
+        return None
+
+    # 讀取資料夾內所有 PDF
+    files = [f for f in os.listdir(manuals_dir) if f.endswith('.pdf')]
+    if not files:
+        st.error("找不到手冊檔案，請檢查 manuals 資料夾內是否有 PDF 檔。")
+        return None
+
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(files):
+        try:
+            progress_text.text(f"正在讀取 ({i+1}/{len(files)}): {file} ...")
+            loader = PyPDFLoader(os.path.join(manuals_dir, file))
+            documents.extend(loader.load())
+            
+            # 關鍵：免費金鑰必須放慢速度，避免觸發 429 錯誤
+            time.sleep(1.5) 
+            progress_bar.progress((i + 1) / len(files))
+        except Exception as e:
+            st.warning(f"無法讀取檔案 {file}: {e}")
+            
+    progress_text.text("正在建立向量特徵庫，請稍候...")
     
     try:
-        all_documents = []
-        for filename in manual_files:
-            loader = PyPDFLoader(os.path.join(MANUALS_DIR, filename))
-            all_documents.extend(loader.load())
-            
-        for filename in report_files:
-            loader = PyPDFLoader(os.path.join(REPORTS_DIR, filename))
-            all_documents.extend(loader.load())
-        
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
-        splits = text_splitter.split_documents(all_documents)
-        
-        embeddings = GenAIEmbeddingsWrapper()
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings, persist_directory=DB_DIR)
-        return vectorstore, None
+        # 使用金鑰進行向量化
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001", 
+            google_api_key=st.secrets["GEMINI_API_KEY"]
+        )
+        return Chroma.from_documents(documents, embeddings)
     except Exception as e:
-        return None, f"後台建立知識庫時發生錯誤：{e}"
+        st.error(f"建立知識庫時發生錯誤 (可能金鑰無效或額度超限): {e}")
+        return None
 
-# ------------------------------------------
-# 前端網頁介面 
-# ------------------------------------------
-st.set_page_config(page_title="電梯維修 AI 智聯專家系統", page_icon="🛠️", layout="wide")
-
-st.sidebar.markdown("### 📚 知識庫整合狀態")
-with st.sidebar.spinner('正在檢查並喚醒官方手冊知識庫中...'):
-    db, error_message = setup_rag_database_multi_file()
-
-if error_message:
-    st.sidebar.error(error_message)
+# --- 主程式邏輯 ---
+if 'db' not in st.session_state:
+    st.info("系統知識庫尚未載入。為了避免超用免費額度，請手動點擊下方按鈕載入。")
+    if st.button("載入知識庫 (只需執行一次)"):
+        with st.spinner("正在安全地轉換手冊為 AI 資料... (這需要一點時間)"):
+            db = load_knowledge_base()
+            if db is not None:
+                st.session_state.db = db
+                st.success("知識庫載入成功！")
+                time.sleep(1) # 暫停一下讓畫面顯示成功訊息
+                st.rerun()    # 重新整理頁面以顯示上傳功能
 else:
-    st.sidebar.success("✅ 官方手冊知識庫已就緒！")
-
-st.title("🛠️ 電梯維修 AI 智聯專家系統 (官方手冊標準版)")
-st.write("本系統已整合「官方技術手冊」。請提供現場線索，AI 將自動對齊原廠規範進行診斷。")
-
-st.markdown("---")
-
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.markdown("### 🔍 現場線索輸入")
-    uploaded_file = st.file_uploader("📸 拍照上傳現場照片 (支援 jpg, png)", type=["jpg", "jpeg", "png"])
-    audio_file = st.audio_input("🎙️ 語音口述現場狀況：")
-    user_text = st.text_area("⌨️ 現場狀況描述 (打字區)：", height=100)
-
-system_instruction = """
-你是一位嚴謹的電梯維修專家。請根據下方提供的「參考手冊」，檢視現場工程師提供的文字、語音或照片：
-1. 找出並核對資料中對應的錯誤代碼、組件名稱或故障說明。
-2. 條列出符合官方規範的排查步驟與現場維修安全守則。
-- 如果參考資料中完全沒有提及此狀況，請誠實告知「手冊未記載此項資訊」，切勿自行瞎掰。
-"""
-
-with col2:
-    st.markdown("### 📋 AI 專家檢修報告")
-    if st.button("🚀 開始對齊與診斷分析", use_container_width=True):
-        if not (uploaded_file or audio_file or user_text.strip()):
-            st.warning("⚠️ 請至少提供一項現場資訊！")
-        elif db is None:
-            st.error("知識庫未成功建立，請檢查左側狀態。")
-        else:
-            with st.spinner('正在調閱手冊原文，比對分析中...'):
-                try:
-                    actual_problem = ""
-                    if user_text.strip():
-                        actual_problem += f"【工程師文字描述】：{user_text}\n"
-                    
-                    if audio_file:
-                        st.toast("正在轉換現場語音...", icon="🎙️")
-                        audio_bytes = audio_file.read()
-                        from google.genai import types
-                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
-                        
-                        transcript_response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=[audio_part, "請精準辨識這段語音，直接輸出繁體中文逐字稿，不需任何額外說明。"],
-                            config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
-                        )
-                        spoken_text = transcript_response.text
-                        st.info(f"🗣️ 語音辨識結果：{spoken_text}")
-                        actual_problem += f"【工程師語音描述】：{spoken_text}\n"
-
-                    search_query = actual_problem if actual_problem.strip() else "請根據照片中的異常現象，提供可能的故障原因。"
-                    relevant_docs = db.as_retriever(search_kwargs={"k": 4}).invoke(search_query)
-                    
-                    context_str = "\n\n--- 參考手冊片段 ---\n"
-                    for i, doc in enumerate(relevant_docs):
-                        context_str += f"[參考文本段落 {i+1}]:\n{doc.page_content}\n"
-                    context_str += "----------------------\n"
-                    
-                    full_content = [system_instruction]
-                    if actual_problem.strip():
-                        full_content.append(actual_problem)
-                    full_content.append(context_str)
-                    
-                    if uploaded_file:
-                        img = Image.open(uploaded_file)
-                        st.image(img, caption="上傳的現場照片", use_container_width=True)
-                        full_content.append(img)
-                    
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=full_content,
-                        config={"http_options": {'headers': {'x-goog-api-key': API_KEY}}}
-                    )
-                    
-                    st.success("分析完成！")
-                    st.write(response.text)
-                    
-                    with st.expander("🔍 檢視本次 AI 參考的知識庫原文片段"):
-                        st.write(context_str)
-                        
-                except Exception as e:
-                    st.error(f"分析時發生錯誤：{e}")
+    st.success("✅ 系統運作中：知識庫已就緒。")
+    
+    st.divider()
+    st.subheader("🛠️ 故障維修報告單分析")
+    
+    # --- 您的核心功能區塊 ---
+    uploaded_file = st.file_uploader("請上傳現場故障維修報告單 (PDF)", type="pdf")
+    
+    if uploaded_file:
+        st.write(f"📄 已讀取檔案: **{uploaded_file.name}**")
+        
+        # 按鈕區塊
+        if st.button("🚀 執行診斷分析", type="primary"):
+            with st.spinner("AI 正在比對現場狀況與手冊內容..."):
+                
+                # ---------------------------------------------------
+                # 這裡保留給您串接後續的 Gemini 分析邏輯
+                # 可以從 st.session_state.db 進行檢索 (Similarity Search)
+                # ---------------------------------------------------
+                
+                time.sleep(1) # 模擬運算時間，串接後可刪除此行
+                st.write("分析完成！(此處為預留的分析結果顯示區)")
