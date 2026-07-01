@@ -25,7 +25,7 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 (優化：增大切片與重疊，防止故障碼定義被截斷) ---
+# --- 知識庫核心 (修復版：保護中文編碼，精準切片) ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
@@ -34,28 +34,34 @@ def load_expert_knowledge_base(system_name):
             for file in os.listdir(directory):
                 if file.endswith('.pdf'):
                     loader = PyPDFLoader(os.path.join(directory, file))
-                    pages = loader.load()
-                    for page in pages:
-                        page.page_content = page.page_content.encode('utf-8', 'ignore').decode('utf-8')
-                    all_docs.extend(pages)
+                    # 拔除 encode('utf-8', 'ignore')，保留原始 PDF 文字，防止關鍵字被吃掉
+                    all_docs.extend(loader.load())
     
     add_docs(os.path.join("./manuals", system_name))
     add_docs("./history")
     
     if not all_docs: return None
-    # 增加 chunk_size 與 overlap，確保故障碼與解釋能被讀入同一個區塊
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    
+    # ⚡ 核心修正：指定中文字元分隔符，絕對不切斷單一中文字的編碼
+    splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", "。", "！", "？", "，", "、", ""],
+        chunk_size=800,
+        chunk_overlap=100
+    )
     split_docs = splitter.split_documents(all_docs)
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return Chroma.from_documents(split_docs, embeddings)
 
 # --- 初始化 ---
 if 'page' not in st.session_state: st.session_state.page = 1
+if 'board_code' not in st.session_state: st.session_state.board_code = ""
+if 'inverter_code' not in st.session_state: st.session_state.inverter_code = ""
+if 'fault_desc' not in st.session_state: st.session_state.fault_desc = ""
 
 # --- 頁面邏輯 ---
 if st.session_state.page == 1:
     st.title("🛠️ 電梯 AI 專家診斷系統")
-    system_options = ["請選擇...", "系統 A (CHIMAX)", "系統 B (HPM)", "系統 C (IED)"]
+    system_options = ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"]
     st.session_state.control_system = st.selectbox("選擇控制系統:", system_options)
     if st.button("確認進入"):
         if st.session_state.control_system != "請選擇...":
@@ -64,10 +70,10 @@ if st.session_state.page == 1:
 
 elif st.session_state.page == 2:
     st.title("📋 現場狀況回報")
-    st.session_state.board_code = st.text_input("主機板故障碼:")
-    st.session_state.inverter_code = st.text_input("變頻器故障碼:")
+    st.session_state.board_code = st.text_input("主機板故障碼:", value=st.session_state.board_code)
+    st.session_state.inverter_code = st.text_input("變頻器故障碼:", value=st.session_state.inverter_code)
     st.info("💡 提示：請使用手機輸入法的「麥克風」圖示進行語音轉文字。")
-    st.session_state.fault_desc = st.text_area("現場狀況描述:", height=150)
+    st.session_state.fault_desc = st.text_area("現場狀況描述:", value=st.session_state.fault_desc, height=150)
     st.session_state.uploaded_file = st.file_uploader("上傳現場照片", type=['jpg', 'jpeg', 'png'])
     
     col1, col2 = st.columns(2)
@@ -81,19 +87,30 @@ elif st.session_state.page == 3:
     with st.spinner("AI 正在深度比對手冊與經驗..."):
         try:
             db = load_expert_knowledge_base(st.session_state.control_system)
-            query = f"故障碼 {st.session_state.board_code} {st.session_state.inverter_code} {st.session_state.fault_desc}"
-            # 增加檢索數量 k=6，擴大查找範圍
-            docs = db.similarity_search(query, k=6) if db else []
+            
+            # 優化搜尋語句，讓 Chroma 更好抓取關鍵字
+            query = f"主機板故障碼:{st.session_state.board_code} 變頻器故障碼:{st.session_state.inverter_code} 狀況:{st.session_state.fault_desc}"
+            
+            # ⚡ 核心修正：退回最安全的 k=4，避免雜訊污染 AI 判斷
+            docs = db.similarity_search(query, k=4) if db else []
             context = "\n".join([d.page_content for d in docs])
             
-            prompt = f"""你是一位資深電梯維修專家。
-            請執行以下任務：
-            1. 優先從檢索到的手冊內容中找出故障碼「{st.session_state.board_code}」或「{st.session_state.inverter_code}」的官方定義。
-            2. 若檢索到的資訊中有具體定義，請直接引用。若定義不符，請明確指出。
-            3. 結合歷史經驗，給出處置建議。
-
-            知識庫內容：{context}
-            現場狀況：系統{st.session_state.control_system}, 描述:{st.session_state.fault_desc}
+            # 簡化且明確的 Prompt，防止 AI 邏輯崩潰
+            prompt = f"""你是一位資深電梯維修專家。請根據下方知識庫內容，提供精簡、準確的繁體中文維修建議。
+            
+            【任務規則】
+            1. 優先尋找與「{st.session_state.board_code}」或「{st.session_state.inverter_code}」完全相符的官方定義。
+            2. 若知識庫中找不到對應的故障碼定義，請誠實回答「手冊中未找到此故障碼」，切勿自行編造。
+            3. 若文字中有出現零星錯字，請自行判斷上下文修正，嚴禁輸出亂碼。
+            
+            【知識庫檢索內容】
+            {context}
+            
+            【現場狀況】
+            系統:{st.session_state.control_system}
+            主機板故障碼:{st.session_state.board_code}
+            變頻器故障碼:{st.session_state.inverter_code}
+            描述:{st.session_state.fault_desc}
             """
 
             llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", google_api_key=st.secrets["GEMINI_API_KEY"])
@@ -111,9 +128,12 @@ elif st.session_state.page == 3:
             st.markdown(response.content)
             
         except Exception as e:
-            st.error(f"分析錯誤: {e}")
+            st.error(f"分析發生錯誤: {e}")
             
     if st.button("結束並重置"):
         st.session_state.page = 1
         st.session_state.uploaded_file = None
+        st.session_state.board_code = ""
+        st.session_state.inverter_code = ""
+        st.session_state.fault_desc = ""
         st.rerun()
