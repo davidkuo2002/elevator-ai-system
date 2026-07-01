@@ -58,7 +58,7 @@ if 'page' not in st.session_state: st.session_state.page = 1
 # --- 頁面流程 ---
 if st.session_state.page == 1:
     st.title("🛠️ 電梯 AI 專家診斷系統")
-    system_options = ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"]
+    system_options = ["請選擇...", "系統 A (CHIMAX)", "系統 B (HPM)", "系統 C (IED)"]
     st.session_state.control_system = st.selectbox("選擇控制系統:", system_options)
     if st.button("確認進入"):
         if st.session_state.control_system != "請選擇...":
