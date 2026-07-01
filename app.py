@@ -6,7 +6,6 @@ import base64
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
-# ✅ 修改後 (替換成這行)：
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -80,32 +79,37 @@ if uploaded_report:
     except Exception as e:
         st.sidebar.error("讀取報告失敗。")
 
-# --- 知識庫載入功能 (引進節流切片技術) ---
+# ==========================================
+# 🎯 知識庫動態載入功能 (依據選擇的系統動態加載)
+# ==========================================
 @st.cache_resource(show_spinner=False)
-def load_knowledge_base():
-    manuals_dir = "./manuals"
-    documents = []
+def load_knowledge_base_by_system(system_name):
+    """
+    帶有參數的快取函式。當 system_name 不同時，Streamlit 會在記憶體中
+    分別建立並保存各自獨立的向量資料庫，互不干擾。
+    """
+    # 定義該系統手冊所在的子資料夾路徑
+    target_dir = os.path.join("./manuals", system_name)
     
-    if not os.path.exists(manuals_dir):
-        os.makedirs(manuals_dir)
+    if not os.path.exists(target_dir):
         return None
         
-    files = [f for f in os.listdir(manuals_dir) if f.endswith('.pdf')]
+    files = [f for f in os.listdir(target_dir) if f.endswith('.pdf')]
     if not files:
         return None
         
+    documents = []
     for file in files:
-        loader = PyPDFLoader(os.path.join(manuals_dir, file))
+        loader = PyPDFLoader(os.path.join(target_dir, file))
         documents.extend(loader.load())
         
-    # ⚡ 節流關鍵設定：將整頁 PDF 切割成 600 字的小片段，彼此重疊 60 字確保語意不中斷
+    # 文字精細切片，極致節省流量
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=60)
     split_docs = text_splitter.split_documents(documents)
     
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     return Chroma.from_documents(split_docs, embeddings)
 
-st.session_state.db = load_knowledge_base()
 
 # ==========================================
 # 網頁流程路由
@@ -114,13 +118,14 @@ st.session_state.db = load_knowledge_base()
 # ----------------- 第一頁：選擇控制系統 -----------------
 if st.session_state.page == 1:
     st.title("🛠️ 第一步：選擇控制系統")
-    if st.session_state.db is None:
-        st.warning("⚠️ 尚未偵測到原廠手冊，請確認 manuals 資料夾內有 PDF 檔案。")
-        
+    
+    # 選單名稱必須與 manuals 底下的子資料夾名稱完全一致
+    system_options = ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"]
+    
     control_system = st.selectbox(
         "請確認目前維修的電梯廠牌與控制系統：",
-        ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微電腦變頻型)", "系統 C (最新無機房型)"],
-        index=0 if not st.session_state.control_system else ["請選擇...", "系統 A (傳統繼電器型)", "系統 B (微电脑變頻型)", "系統 C (最新無機房型)"].index(st.session_state.control_system)
+        system_options,
+        index=0 if not st.session_state.control_system else system_options.index(st.session_state.control_system)
     )
     
     if st.button("確認，進入下一步 ➡️", type="primary"):
@@ -171,16 +176,23 @@ elif st.session_state.page == 2:
 # ----------------- 第三頁：AI 判斷分析結果 -----------------
 elif st.session_state.page == 3:
     st.title("📊 第三步：AI 診斷分析結果")
-    st.info(f"正在針對 **{st.session_state.control_system}** 進行多維度分析...")
+    st.info(f"正在針對 **{st.session_state.control_system}** 進行專屬對比分析...")
     
-    with st.spinner("AI 正在比對手冊、歷史報告與現場照片..."):
+    with st.spinner("AI 正在下載/提取該系統專屬知識庫，並比對現場狀況..."):
         try:
-            # 1. 檢索出最相關的 3 個小片段（由於前面切碎了，此處傳遞給 AI 的字數極少、極精準）
-            search_query = f"系統:{st.session_state.control_system} 故障碼:{st.session_state.fault_code} 狀況:{st.session_state.fault_desc}"
-            docs = st.session_state.db.similarity_search(search_query, k=3) if st.session_state.db else []
-            manual_context = "\n".join([doc.page_content for doc in docs])
+            # 💡 核心變更：動態加載該控制系統對應子資料夾的手冊
+            current_db = load_knowledge_base_by_system(st.session_state.control_system)
             
-            # 2. 組合優化後的提示詞（加入嚴格的 Output 流量約束）
+            # 進行語意搜尋檢索
+            manual_context = ""
+            if current_db is not None:
+                search_query = f"故障碼:{st.session_state.fault_code} 狀況:{st.session_state.fault_desc}"
+                docs = current_db.similarity_search(search_query, k=3)
+                manual_context = "\n".join([doc.page_content for doc in docs])
+            else:
+                manual_context = "未找到該系統的專屬原廠技術手冊檔案，僅依據經驗進行診斷。"
+            
+            # 組合節流版提示詞
             prompt = f"""
             你是一位資深的電梯維修工程師。請綜合以下資訊，給予現場維修人員最專業、安全的處置建議。
             注意：請用最精煉、扼要的繁體中文回答，直擊核心，避免冗長贅字與客套話，以幫我節省 Token 流量。
@@ -190,8 +202,8 @@ elif st.session_state.page == 3:
             - 故障碼：{st.session_state.fault_code}
             - 狀況描述：{st.session_state.fault_desc}
             
-            【原廠技術手冊參考內容】
-            {manual_context if manual_context else "無相關手冊資料。"}
+            【該系統專屬技術手冊參考內容】
+            {manual_context}
             
             【歷史故障維修報告單參考】
             {report_text if report_text else "本次未提供歷史報告。"}
@@ -202,7 +214,6 @@ elif st.session_state.page == 3:
             3. 現場安全注意事項（一秒看懂）。
             """
 
-            # 3. 呼叫最新世代 gemini-3.5-flash
             llm = ChatGoogleGenerativeAI(
                 model="gemini-3.5-flash", 
                 google_api_key=st.secrets["GEMINI_API_KEY"]
