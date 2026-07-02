@@ -1,11 +1,13 @@
 import streamlit as st
 import os
 import base64
+import re  # 👈 新增：用於清理文本雜訊
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_google_genai import GoogleGenerativeAIEmbeddings  # 👈 核心加速套件
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_core.messages import HumanMessage
 
 st.set_page_config(page_title="電梯 AI 專家診斷系統", layout="centered")
@@ -25,33 +27,41 @@ encoded_string = get_cached_background()
 if encoded_string:
     st.markdown(f"""<style>.stApp {{background-image: url("data:image/jpeg;base64,{encoded_string}"); background-size: cover;}}</style>""", unsafe_allow_html=True)
 
-# --- 知識庫核心 (保護中文編碼 + Google 雲端加速) ---
+# --- 知識庫核心 (還原流暢度與純淨文本) ---
 @st.cache_resource(show_spinner=False)
 def load_expert_knowledge_base(system_name):
     all_docs = []
     def add_docs(directory):
         if os.path.exists(directory):
             for file in os.listdir(directory):
-                if file.endswith('.pdf'):
-                    loader = PyPDFLoader(os.path.join(directory, file))
+                file_path = os.path.join(directory, file)
+                if file.lower().endswith('.pdf'):
+                    loader = PyPDFLoader(file_path)
+                    pages = loader.load()
+                    # 💡 清理 PDF 抽字時可能產生的控制字元與不明隱形雜訊
+                    for page in pages:
+                        page.page_content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', '', page.page_content)
+                    all_docs.extend(pages)
+                elif file.lower().endswith('.docx'):
+                    loader = Docx2txtLoader(file_path)
                     all_docs.extend(loader.load())
-    
+                    
     add_docs(os.path.join("./manuals", system_name))
     add_docs("./history")
     
     if not all_docs: return None
     
-    # 嚴格保護中文字元不被切斷
+    # 穩定的中文自然段落切片
     splitter = RecursiveCharacterTextSplitter(
-        separators=["\n\n", "\n", "。", "！", "？", "，", "、", ""],
-        chunk_size=800,
-        chunk_overlap=100
+        separators=["\n\n", "\n", "。", "，"],
+        chunk_size=700,
+        chunk_overlap=120
     )
     split_docs = splitter.split_documents(all_docs)
     
-    # ⚡ 核心加速：將 55 頁的運算負擔轉移給 Google 伺服器
+    # ⚡ 升級為 Google 最新代 text-embedding-004 模型，語意辨識大幅提升
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001", 
+        model="models/text-embedding-004", 
         google_api_key=st.secrets["GEMINI_API_KEY"]
     )
     return Chroma.from_documents(split_docs, embeddings)
@@ -92,25 +102,27 @@ elif st.session_state.page == 3:
         try:
             db = load_expert_knowledge_base(st.session_state.control_system)
             
-            query = f"主機板故障碼:{st.session_state.board_code} 變頻器故障碼:{st.session_state.inverter_code} 狀況:{st.session_state.fault_desc}"
+            query = f"主機板故障碼 {st.session_state.board_code} 變頻器故障碼 {st.session_state.inverter_code} {st.session_state.fault_desc}"
             docs = db.similarity_search(query, k=4) if db else []
             context = "\n".join([d.page_content for d in docs])
             
-            prompt = f"""你是一位資深電梯維修專家。請根據下方知識庫內容，提供精簡、準確的繁體中文維修建議。
+            # 💡 還原最初深受好評的「專業老前輩維修專家」Prompt 風格
+            prompt = f"""你是一位擁有20年現場維修經驗的資深電梯技術專家。
+            請詳細閱讀下方的技術手冊規範與過往故障處置單，針對現場人員回報的故障碼與狀況，給出最精準、最具實戰價值的繁體中文維修指導。
             
-            【任務規則】
-            1. 優先尋找與「{st.session_state.board_code}」或「{st.session_state.inverter_code}」完全相符的官方定義。
-            2. 若知識庫中找不到對應的故障碼定義，請誠實回答「手冊中未找到此故障碼」，切勿自行編造。
-            3. 若文字中有出現零星錯字，請自行判斷上下文修正，嚴禁輸出亂碼。
-            
-            【知識庫檢索內容】
+            手冊與經驗參考資料：
             {context}
             
-            【現場狀況】
-            系統:{st.session_state.control_system}
-            主機板故障碼:{st.session_state.board_code}
-            變頻器故障碼:{st.session_state.inverter_code}
-            描述:{st.session_state.fault_desc}
+            現狀回報：
+            - 控制系統：{st.session_state.control_system}
+            - 主機板故障碼：{st.session_state.board_code}
+            - 變頻器故障碼：{st.session_state.inverter_code}
+            - 現場狀況描述：{st.session_state.fault_desc}
+            
+            請條列式清晰輸出：
+            1. 故障原因深度分析（指出可能損壞的零件、迴路或接點）
+            2. 現場維修處置步驟（按檢查順序排列，寫出具體動作）
+            3. 現場作業安全警示
             """
 
             llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", google_api_key=st.secrets["GEMINI_API_KEY"])
